@@ -1,0 +1,12 @@
+numpy
+torch
+torchvision
+scipy
+matplotlib
+braceexpand
+editdistance
+einsum
+einops
+imageio
+-e git+https://github.com/tmbdev/webdataset#egg=webdataset
+-e git+https://github.com/tmbdev/torchmore2#egg=torchmore2
