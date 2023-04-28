@@ -1,21 +1,18 @@
 #!/usr/bin/env python
 
-import argparse, sys
-from itertools import islice
 
 import matplotlib.pyplot as plt
 import numpy as np
-import PIL
-import webdataset as wds
 from scipy import stats
 from scipy.ndimage import filters, interpolation, morphology
-from webdataset import getfirst
 
 debug_nlbin = False
+
 
 class Record:
     def __init__(self, **kw):
         self.__dict__.update(kw)
+
 
 def check_page(image):
     """Checks whether the input roughly conforms to the requirements of a page."""
@@ -138,7 +135,7 @@ def estimate_thresholds(flat, bignore=0.1, escale=1.0, lo=5, hi=90, debug=0):
         # based low and high estimates more reliable
         e = escale
         v = est - filters.gaussian_filter(est, e * 20.0)
-        v = filters.gaussian_filter(v ** 2, e * 20.0) ** 0.5
+        v = filters.gaussian_filter(v**2, e * 20.0) ** 0.5
         v = v > 0.3 * np.amax(v)
         v = morphology.binary_dilation(v, structure=np.ones((int(e * 50), 1)))
         v = morphology.binary_dilation(v, structure=np.ones((1, int(e * 50))))
@@ -190,5 +187,3 @@ def nlbin(raw, args=None, deskew=True):
     flat /= hi - lo
     flat = np.clip(flat, 0, 1)
     return flat
-
-

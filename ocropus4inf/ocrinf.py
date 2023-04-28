@@ -5,7 +5,6 @@ import numpy as np
 import requests
 import scipy.ndimage as ndi
 import torch
-from torchmore2.ctc import ctc_decode
 import urllib
 
 from . import nlbin
@@ -22,20 +21,47 @@ class DefaultCharset:
         if isinstance(chars, str):
             chars = list(chars)
         self.chars = [""] + chars
+
     def __len__(self):
         return len(self.chars)
+
     def encode_char(self, c):
         try:
             index = self.chars.index(c)
         except ValueError:
-            index = len(self.chars)-1
+            index = len(self.chars) - 1
         return max(index, 1)
+
     def encode(self, s):
         assert isinstance(s, str)
         return [self.encode_char(c) for c in s]
+
     def decode(self, l):
         assert isinstance(l, list)
-        return "".join([self.chars[k] for k in l])        
+        return "".join([self.chars[k] for k in l])
+
+
+def ctc_decode(probs, sigma=1.0, threshold=0.7, kind=None, full=False):
+    """A simple decoder for CTC-trained OCR recognizers.
+
+    :probs: d x l sequence classification output
+    """
+    assert probs.ndim == 2, probs.shape
+    assert isinstance(probs, np.ndarray)
+    probs = probs.T
+    assert (
+        abs(probs.sum(1) - 1) < 1e-4
+    ).all(), f"input not normalized; did you apply .softmax()? {probs.sum(1)}"
+    probs = ndi.gaussian_filter(probs, (sigma, 0))
+    probs /= probs.sum(1)[:, np.newaxis]
+    labels, n = ndi.label(probs[:, 0] < threshold)
+    mask = np.tile(labels[:, np.newaxis], (1, probs.shape[1]))
+    mask[:, 0] = 0
+    maxima = ndi.maximum_position(probs, mask, np.arange(1, np.amax(mask) + 1))
+    if not full:
+        return [c for r, c in sorted(maxima)]
+    else:
+        return [(r, c, probs[r, c]) for r, c in sorted(maxima)]
 
 
 class OnDevice:
@@ -77,6 +103,7 @@ class OnDevice:
 
 def usm_filter(image):
     return image - ndi.gaussian_filter(image, 16.0)
+
 
 class PageSegmenter:
     def __init__(self, murl, device=default_device):
@@ -163,6 +190,7 @@ def get_model(url):
     else:
         raise Exception("unknown url scheme: " + url)
 
+
 def load_model(path):
     print("loading model", path)
     if path.endswith(".jit"):
@@ -181,6 +209,7 @@ def load_model(path):
     else:
         raise Exception("unknown model type: " + path)
 
+
 class WordRecognizer:
     def __init__(self, murl, charset=None, device=default_device, maxheight=48.0):
         charset = charset or make_ascii_charset()
@@ -194,7 +223,7 @@ class WordRecognizer:
         images = [scale_to_maxheight(im, self.maxheight) for im in images]
         images = [usm_filter(im) for im in images]
         assert all(im.shape[0] <= self.maxheight for im in images)
-        input = batch_images(images) # BDHW
+        input = batch_images(images)  # BDHW
         assert torch.is_tensor(input)
         with OnDevice(self.model, self.device) as model:
             with torch.no_grad():
