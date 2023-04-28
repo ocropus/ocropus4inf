@@ -1,4 +1,3 @@
 #!/bin/bash
 
-echo no script yet
-exit 1
+python3 -m ocropus4inf.ocropus4inf "$@"

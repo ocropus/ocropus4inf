@@ -9,3 +9,4 @@ einsum
 einops
 imageio
 webdataset
+typer
