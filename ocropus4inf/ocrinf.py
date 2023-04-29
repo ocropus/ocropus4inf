@@ -15,6 +15,10 @@ plt.rc("image", interpolation="nearest")
 default_device = "?cuda:0" if torch.cuda.is_available() else "cpu"
 default_device = os.environ.get("OCROPUS4_DEVICE", default_device)
 
+cache_dir = os.path.expanduser(os.environ.get("OCROPUS4_CACHE", "~/.cache/ocropus4"))
+model_bucket = "http://storage.googleapis.com/ocro-models/v1/"
+default_textmodel = model_bucket + "lstm_resnet_v2-default.jit"
+default_segmodel = model_bucket + "seg_unet_v2-default.jit"
 
 class DefaultCharset:
     def __init__(self, chars="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"):
@@ -107,6 +111,7 @@ def usm_filter(image):
 
 class PageSegmenter:
     def __init__(self, murl, device=default_device):
+        murl = murl or default_segmodel
         self.model = get_model(murl).to(device)
         self.device = device
 
@@ -168,10 +173,9 @@ def get_model(url):
         return load_model(path)
     elif scheme in ["http", "https"]:
         # download the file to $HOME/.cache/ocropus4
-        cache = os.path.expanduser("~/.cache/ocropus4")
-        os.makedirs(cache, exist_ok=True)
+        os.makedirs(cache_dir, exist_ok=True)
         fname = os.path.basename(path)
-        local = os.path.join(cache, fname)
+        local = os.path.join(cache_dir, fname)
         if not os.path.exists(local):
             print("downloading", url, "to", local)
             with open(local, "wb") as stream:
@@ -179,10 +183,9 @@ def get_model(url):
         return load_model(local)
     elif scheme in ["gs"]:
         # download using the gsutil command line program
-        cache = os.path.expanduser("~/.cache/ocropus4")
-        os.makedirs(cache, exist_ok=True)
+        os.makedirs(cache_dir, exist_ok=True)
         fname = os.path.basename(path)
-        local = os.path.join(cache, fname)
+        local = os.path.join(cache_dir, fname)
         if not os.path.exists(local):
             print("downloading", url, "to", local)
             os.system("gsutil cp {} {}".format(url, local))
@@ -212,6 +215,7 @@ def load_model(path):
 
 class WordRecognizer:
     def __init__(self, murl, charset=None, device=default_device, maxheight=48.0):
+        murl = murl or default_textmodel
         charset = charset or make_ascii_charset()
         self.device = device
         self.charset = charset
@@ -358,13 +362,6 @@ def download_file(url, filename, overwrite=False):
     return filename
 
 
-cache_dir = os.environ.get("OCROPUS4_CACHE", None) or os.path.expanduser(
-    "~/.cache/ocropus4"
-)
-model_bucket = "http://storage.googleapis.com/ocro-models/v1/"
-default_textmodel = model_bucket + "lstm_resnet_f-007-000198062.pth"
-default_segmodel = model_bucket + "seg_unet2f-102-000215483.pth"
-
 
 def autoinvert(image):
     if image.shape[0] < 2 or image.shape[1] < 2:
@@ -379,9 +376,6 @@ def autoinvert(image):
 class PageRecognizer:
     def __init__(self, segmodel=None, textmodel=None, device=default_device):
         self.device = device
-        os.makedirs(cache_dir, exist_ok=True)
-        segmodel = segmodel or default_segmodel
-        textmodel = textmodel or default_textmodel
         self.segmenter = PageSegmenter(segmodel, device=device)
         self.textmodel = WordRecognizer(textmodel, device=device)
         self.words_per_batch = 64

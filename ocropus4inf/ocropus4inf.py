@@ -14,19 +14,11 @@ from . import ocrinf as inf
 app = typer.Typer()
 
 
-textmodel = os.environ.get(
-    "TEXT_MODEL",
-    "https://storage.googleapis.com/ocro-models/v1/lstm_resnet_v2-038-000330009.jit",
-)
-segmodel = os.environ.get(
-    "SEG_MODEL",
-    "https://storage.googleapis.com/ocro-models/v1/seg_unet_v2-023-000272940.jit",
-)
 device = os.environ.get("DEVICE", "cuda:0")
 
 
 @app.command()
-def lines(files: List[str], nlbin: bool = False, verbose: bool = False):
+def lines(files: List[str], textmodel:str=None, nlbin: bool = False, verbose: bool = False):
     """Perform recognition on a set of lines and output the results as text."""
     textrec = inf.WordRecognizer(textmodel, device=device)
     images = [inf.autoinvert(imageio.imread(arg)/255.0) for arg in files]
@@ -41,7 +33,7 @@ def lines(files: List[str], nlbin: bool = False, verbose: bool = False):
 
 
 @app.command()
-def showpage(fname, nlbin: bool = False):
+def showpage(fname, textmodel:str = None, segmodel=None, nlbin: bool = False):
     """Perform recognition on a single page and display the result using Matplotlib."""
     import matplotlib.pyplot as plt
     pagerec = inf.PageRecognizer(textmodel=textmodel, segmodel=segmodel, device=device)
@@ -52,7 +44,7 @@ def showpage(fname, nlbin: bool = False):
 
 
 @app.command()
-def pages2json(files: List[str], nlbin: bool = False):
+def pages2json(files: List[str], textmodel:str=None, segmodel:str=None, nlbin: bool = False):
     """Recognize pages and output results as JSON."""
     pagerec = inf.PageRecognizer(textmodel=textmodel, segmodel=segmodel, device=device)
     mode = "none" if not nlbin else "binarize"
