@@ -389,6 +389,8 @@ class PageRecognizer:
             return False
         if h > 200:
             return False
+        if h < 5 or w < 5:
+            return False
         if not (np.amin(binarized) < 0.1 and np.amax(binarized) > 0.9):
             return False
         if False:  # FIXME
