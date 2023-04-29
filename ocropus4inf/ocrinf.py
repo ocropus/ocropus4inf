@@ -112,7 +112,7 @@ def usm_filter(image):
 class PageSegmenter:
     def __init__(self, murl, device=default_device):
         murl = murl or default_segmodel
-        self.model = get_model(murl).to(device)
+        self.model = get_model(murl)
         self.device = device
 
     def inference(self, image):
@@ -219,7 +219,7 @@ class WordRecognizer:
         charset = charset or make_ascii_charset()
         self.device = device
         self.charset = charset
-        self.model = get_model(murl).to(device)
+        self.model = get_model(murl)
         self.maxheight = maxheight
 
     def inference(self, images):
