@@ -119,8 +119,8 @@ class PageSegmenter:
         assert isinstance(image, np.ndarray)
         # print("segmenter:", np.amin(image), np.median(image), np.mean(image), np.amax(image))
         if image.ndim == 3:
-            assert image.shape[2] in [1, 3]
-            image = np.mean(image, axis=2)
+            assert image.shape[2] in [1, 3, 4], image.shape
+            image = np.mean(image[:, :, :3], axis=2)
         assert np.amin(image) >= 0
         assert np.amax(image) <= 1
         image = usm_filter(image)
@@ -255,15 +255,12 @@ def compute_segmentation(probs, show=True):
     word_sources = word_labels[sources[0], sources[1]]
     # show_seg(word_sources)
 
-    word_boundaries = np.maximum(
-        (np.roll(word_sources, 1, 0) != word_sources),
-        np.roll(word_sources, 1, 1) != word_sources,
-    )
-    word_boundaries = ndi.minimum_filter(ndi.maximum_filter(word_boundaries, 4), 2)
+    word_boundaries = (ndi.maximum_filter(word_sources, 5) - ndi.minimum_filter(word_sources, 5) > 0)
     # plt.imshow(word_boundaries)
 
     # separators = maximum(probs[:,:,1]>0.3, word_boundaries)
-    separators = np.maximum(probs[:, :, 1] > 0.3, probs[:, :, 0] > 0.5, word_boundaries)
+    separators = np.maximum((probs[:, :, 1] > 0.3), (probs[:, :, 0] > 0.5))
+    separators = np.maximum(separators, word_boundaries)
     # plt.imshow(separators)
     all_components, n = ndi.label(1 - separators)
     # show_seg(all_components)
@@ -403,6 +400,8 @@ class PageRecognizer:
         return True
 
     def recognize(self, image, keep_images=False, preproc="none"):
+        if image.ndim == 3:
+            image = np.mean(image[:, :, :3], axis=2)
         self.image = image
         self.bin = nlbin.nlbin(image, deskew=False)
         if preproc == "none":

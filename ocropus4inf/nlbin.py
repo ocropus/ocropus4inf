@@ -172,6 +172,8 @@ def nlbin(raw, args=None, deskew=True):
     if args is None:
         args = nlbin_defaults()
     assert raw.dtype in (float, np.float32)
+    if raw.ndim == 3:
+        raw = raw.mean(2)
     image = normalize_raw_image(raw)
     flat = estimate_local_whitelevel(
         image, args.zoom, args.perc, args.dist, debug_nlbin
