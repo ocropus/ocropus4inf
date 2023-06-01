@@ -1,3 +1,4 @@
+# sourcery skip: use-fstring-for-concatenation
 import os
 import os, random, shutil
 import matplotlib.pyplot as plt
@@ -6,6 +7,8 @@ import requests
 import scipy.ndimage as ndi
 import torch
 import urllib
+
+from collections import defaultdict
 
 from . import nlbin
 
@@ -118,6 +121,45 @@ class OnDevice:
 
 def usm_filter(image):
     return image - ndi.gaussian_filter(image, 16.0)
+
+
+def remove_small_connected_components(image, threshold):
+    labels, n = ndi.label(image)
+    sizes = np.bincount(labels.ravel())
+    mask_sizes = sizes > threshold
+    mask_sizes[0] = 0
+    remove_small = mask_sizes[labels]
+    return remove_small
+
+
+def spread_labels(labels, maxdist=9999999):
+    """Spread the given labels to the background"""
+    distances, features = ndi.distance_transform_edt(labels == 0, return_distances=1, return_indices=1)
+    indexes = features[0] * labels.shape[1] + features[1]
+    spread = labels.ravel()[indexes.ravel()].reshape(*labels.shape)
+    spread *= distances < maxdist
+    return spread
+
+
+def remove_unmarked_regions(markers, regions):
+    """Remove regions that are not marked by markers."""
+    m = 1000000
+    labels, _ = ndi.label(markers)
+    rlabels, rn = ndi.label(regions)
+    corr = np.unique((rlabels * m + labels).ravel())
+    remap = np.zeros(rn + 1, dtype=np.int32)
+    for k in corr:
+        remap[k // m] = k % m
+    return remap[rlabels]
+
+
+def marker_segmentation(markers, regions, maxdist=100):
+    regions = np.maximum(regions, markers)
+    labels, _ = ndi.label(markers)
+    regions = (remove_unmarked_regions(markers, regions) > 0)
+    spread = spread_labels(labels, maxdist=maxdist)
+    segmented = np.where(np.maximum(markers, regions), spread, 0)
+    return segmented
 
 
 class PageSegmenter:
@@ -330,6 +372,17 @@ def compute_bboxes(wordmap, pad=10, padr=0):
             r=xs.stop + max(pad[3], int(padr[3] * h)),
         )
 
+def bbox_all(list_of_bboxes):
+    return dict(
+        t=min(a["t"] for a in list_of_bboxes),
+        l=min(a["l"] for a in list_of_bboxes),
+        b=max(a["b"] for a in list_of_bboxes),
+        r=max(a["r"] for a in list_of_bboxes),
+    )
+
+def bbox_center(a):
+    return (a["l"] + a["r"]) / 2, (a["t"] + a["b"]) / 2
+
 def bbox_height(a):
     return a["b"] - a["t"]
 
@@ -337,11 +390,11 @@ def bbox_width(a):
     return a["r"] - a["l"]
 
 def bbox_right_of(a, b):
-    xc, yc = (a["l"] + a["r"]) / 2, (a["t"] + a["b"]) / 2
+    xc, yc = bbox_center(a)
     return xc > b["l"] and yc >= b["t"] and yc <= b["b"]
 
 def bbox_same_line(a, b):
-    xc, yc = (a["l"] + a["r"]) / 2, (a["t"] + a["b"]) / 2
+    xc, yc = bbox_center(a)
     return yc >= b["t"] and yc <= b["b"]
 
 def bbox_overlap(a, b):
@@ -411,7 +464,7 @@ def show_extracts(image, bboxes, nrows=4, ncols=3):
 def download_file(url, filename, overwrite=False):
     if os.path.exists(filename) and not overwrite:
         return filename
-    assert 0 == os.system("curl -L -o '{}' '{}'".format(filename, url))
+    assert 0 == os.system(f"curl -L -o '{filename}' '{url}'")
     return
     print(f"Downloading {url} to {filename}")
     with requests.get(url, stream=True) as r:
@@ -429,6 +482,40 @@ def autoinvert(image):
         return 1 - image
     else:
         return image
+    
+
+def compute_linemap(probs):
+    marker = probs[:, :, 6]> 0.3
+    marker = ndi.minimum_filter(ndi.maximum_filter(marker, (5, 10)), (5, 10))
+    marker1 = remove_small_connected_components(marker, 100)
+    labels, n = ndi.label(marker1)
+    labels1 = spread_labels(labels, 100)
+    return labels1
+
+def assign_bboxes_to_lines(bboxes, linemap):
+    for bbox in bboxes:
+        xc, yc = bbox_center(bbox)
+        bbox["lineno"] = linemap[int(yc), int(xc)]
+    lines = defaultdict(list)
+    for bbox in bboxes:
+        lines[bbox["lineno"]].append(bbox)
+    return lines
+
+def bbox_patch(box, text=None, ax=None, linewidth=1, rcolor="r", alpha=1.0, facecolor="none", fontsize=12, color="r", offset=(0, 0)):
+    t, l, b, r = [box[c] for c in "tlbr"]
+    ax.text(l + offset[0], t + offset[1], text, fontsize=fontsize, color=color)
+    # draw a rectangle around the word
+    ax.add_patch(
+        patches.Rectangle(
+            (l, t),
+            r - l,
+            b - t,
+            linewidth=linewidth,
+            edgecolor=rcolor,
+            facecolor=facecolor,
+            alpha=alpha,
+        )
+    )
 
 
 class PageRecognizer:
@@ -495,6 +582,11 @@ class PageRecognizer:
             assert len(pred) == len(bboxes)
             for i in range(len(bboxes)):
                 bboxes[i]["text"] = pred[i]
+        if self.seg_full.shape[2] == 7:
+            self.linemap = compute_linemap(self.seg_full)
+            self.lines = assign_bboxes_to_lines(self.bboxes, self.linemap)
+        else:
+            self.lines = {0: self.bboxes}
         if not keep_images:
             for b in self.bboxes:
                 del b["image"]
@@ -502,7 +594,7 @@ class PageRecognizer:
         return self.bboxes
 
     def draw_overlaid(
-        self, fontsize=6, offset=(5, 10), color="red", rcolor="red", alpha=0.25, ax=None
+        self, fontsize=6, offset=(5, 10), color="red", rcolor="red", lcolor="green", alpha=0.25, ax=None
     ):
         if ax is None:
             fig, ax = plt.subplots(1, 1, figsize=(20, 20))
@@ -510,20 +602,14 @@ class PageRecognizer:
         for i in range(len(self.bboxes)):
             box = self.bboxes[i]
             text = box["text"]
-            t, l, b, r = [box[c] for c in "tlbr"]
-            ax.text(l + offset[0], t + offset[1], text, fontsize=fontsize, color=color)
-            # draw a rectangle around the word
-            ax.add_patch(
-                patches.Rectangle(
-                    (l, t),
-                    r - l,
-                    b - t,
-                    linewidth=1,
-                    edgecolor=rcolor,
-                    facecolor="none",
-                    alpha=alpha,
-                )
-            )
+            bbox_patch(box, text=text, ax=ax, fontsize=fontsize, color=color, offset=offset)
+        for i in self.lines.keys():
+            if i == 0:
+                continue
+            bboxes = self.lines[i]
+            box = bbox_all(bboxes)
+            bbox_patch(box, ax=ax, rcolor=lcolor)
+
 
     def draw_words(self, nrows=6, ncols=4, ax=None):
         bboxes = list(self.bboxes)
