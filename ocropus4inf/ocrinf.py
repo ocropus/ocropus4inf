@@ -68,6 +68,16 @@ def ctc_decode(probs, sigma=1.0, threshold=0.7, kind=None, full=False):
         return [(r, c, probs[r, c]) for r, c in sorted(maxima)]
 
 
+def jit_change_device(model, device="cuda:0"):
+    if not hasattr(model, "modules"):
+        return
+    for m in model.modules():
+        if not hasattr(m, "original_name"):
+            continue
+        if m.original_name == "AutoDevice":
+            m.device = "cuda:0"
+
+
 class OnDevice:
     """Performs inference on device.
 
@@ -98,6 +108,7 @@ class OnDevice:
     def __enter__(self, *args):
         if self.device is not None:
             self.model = self.model.to(self.device)
+            jit_change_device(self.model, self.device)
         return self
 
     def __exit__(self, *args):
@@ -131,7 +142,12 @@ class PageSegmenter:
         with OnDevice(self.model, self.device) as model:
             with torch.no_grad():
                 output = model(input)
-        probs = output.softmax(1)[0].cpu().permute(1, 2, 0).detach().numpy()
+        if output.shape[1] == 7:
+            probs = output.detach().sigmoid()[0].cpu().permute(1, 2, 0).numpy()
+        elif output.shape[1] == 4:
+            probs = output.detach().softmax(1)[0].cpu().permute(1, 2, 0).numpy()
+        else:
+            raise ValueError(f"bad output shape: {output.shape}")
         return probs
 
 
@@ -193,13 +209,12 @@ def get_model(url):
     else:
         raise Exception("unknown url scheme: " + url)
 
-
 def load_model(path):
     print("loading model", path)
     if path.endswith(".jit"):
         import torch.jit
 
-        return torch.jit.load(path)
+        return torch.jit.load(path, map_location=torch.device("cpu"))
     elif path.endswith(".pth"):
         import torch
         import ocrlib.ocrmodels as models
@@ -245,8 +260,8 @@ def show_seg(a, ax=None):
 
 
 def compute_segmentation(probs, show=True):
-    word_markers = probs[:, :, 3] > 0.5
-    word_markers = ndi.minimum_filter(ndi.maximum_filter(word_markers, (1, 3)), (1, 3))
+    word_markers = probs[:, :, 3] > 0.3
+    word_markers = ndi.minimum_filter(ndi.maximum_filter(word_markers, (3, 5)), (3, 5))
     # plt.imshow(word_markers)
 
     word_labels, n = ndi.label(word_markers)
@@ -259,7 +274,9 @@ def compute_segmentation(probs, show=True):
     # plt.imshow(word_boundaries)
 
     # separators = maximum(probs[:,:,1]>0.3, word_boundaries)
-    separators = np.maximum((probs[:, :, 1] > 0.3), (probs[:, :, 0] > 0.5))
+    separators = np.maximum(probs[:, :, 1] > 0.5, probs[:, :, 0] > 0.5)
+    separators = np.minimum(separators, (probs[:, :, 2] < 0.5))
+    separators = np.minimum(separators, (probs[:, :, 3] < 0.5))
     separators = np.maximum(separators, word_boundaries)
     # plt.imshow(separators)
     all_components, n = ndi.label(1 - separators)
@@ -313,6 +330,50 @@ def compute_bboxes(wordmap, pad=10, padr=0):
             r=xs.stop + max(pad[3], int(padr[3] * h)),
         )
 
+def bbox_height(a):
+    return a["b"] - a["t"]
+
+def bbox_width(a):
+    return a["r"] - a["l"]
+
+def bbox_right_of(a, b):
+    xc, yc = (a["l"] + a["r"]) / 2, (a["t"] + a["b"]) / 2
+    return xc > b["l"] and yc >= b["t"] and yc <= b["b"]
+
+def bbox_same_line(a, b):
+    xc, yc = (a["l"] + a["r"]) / 2, (a["t"] + a["b"]) / 2
+    return yc >= b["t"] and yc <= b["b"]
+
+def bbox_overlap(a, b):
+    t0, l0, b0, r0 = [a[c] for c in "tlbr"]
+    t1, l1, b1, r1 = [b[c] for c in "tlbr"]
+    return max(0, min(b0, b1) - max(t0, t1)) * max(0, min(r0, r1) - max(l0, l1))
+
+def bbox_merge(a, b):
+    t0, l0, b0, r0 = [a[c] for c in "tlbr"]
+    t1, l1, b1, r1 = [b[c] for c in "tlbr"]
+    return dict(
+        t=min(t0, t1),
+        l=min(l0, l1),
+        b=max(b0, b1),
+        r=max(r0, r1),
+    )
+
+def merge_overlapping(bboxes):
+    bboxes = list(bboxes)
+    for i in range(len(bboxes)):
+        for j in range(len(bboxes)):
+            if i == j:
+                continue
+            if bboxes[i] is None or bboxes[j] is None:
+                continue
+            if bbox_right_of(bboxes[j], bboxes[i]) and bboxes[j]["l"] - bboxes[i]["r"] < 5:
+                bboxes[i] = bbox_merge(bboxes[i], bboxes[j])
+                bboxes[j] = None
+            elif bbox_same_line(bboxes[j], bboxes[i]) and bbox_overlap(bboxes[j], bboxes[i]) > 0:
+                bboxes[i] = bbox_merge(bboxes[i], bboxes[j])
+                bboxes[j] = None
+    return [b for b in bboxes if b is not None]
 
 # bboxes = list(compute_bboxes(probs, pad=10))
 
@@ -413,10 +474,12 @@ class PageRecognizer:
         else:
             raise ValueError("preproc must be one of none, binarize, threshold")
         self.srcimg = srcimg
-        self.seg_probs = self.segmenter.inference(srcimg)
+        self.seg_full = self.segmenter.inference(srcimg)
+        self.seg_probs = self.seg_full[:, :, :4]  # word segmentation only
         self.segmentation = compute_segmentation(self.seg_probs)
         self.wordmap = self.segmentation["result"]
         self.bboxes = list(compute_bboxes(self.wordmap))
+        self.bboxes = merge_overlapping(self.bboxes)
         for i in range(len(self.bboxes)):
             t, l, b, r = [self.bboxes[i][c] for c in "tlbr"]
             box = self.bboxes[i]
