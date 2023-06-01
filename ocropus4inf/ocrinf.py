@@ -246,17 +246,25 @@ def get_model(url):
         local = os.path.join(cache_dir, fname)
         if not os.path.exists(local):
             print("downloading", url, "to", local)
-            os.system("gsutil cp {} {}".format(url, local))
+            os.system(f"gsutil cp {url} {local}")
         return load_model(local)
     else:
-        raise Exception("unknown url scheme: " + url)
+        raise ValueError(f"unknown url scheme: {url}")
+    
+def flatten_paramters(model):
+    for m in model.modules():
+        if hasattr(m, "flatten_parameters"):
+            m.flatten_parameters()
+    return model
 
 def load_model(path):
     print("loading model", path)
     if path.endswith(".jit"):
         import torch.jit
 
-        return torch.jit.load(path, map_location=torch.device("cpu"))
+        model = torch.jit.load(path, map_location=torch.device("cpu"))
+        model = flatten_paramters(model)
+        return model
     elif path.endswith(".pth"):
         import torch
         import ocrlib.ocrmodels as models
@@ -265,6 +273,7 @@ def load_model(path):
         model = models.make(mname, device="cpu")
         mdict = torch.load(path, map_location=torch.device("cpu"))
         model.load_state_dict(mdict)
+        model = flatten_paramters(model)
         return model
     else:
         raise Exception("unknown model type: " + path)
@@ -393,6 +402,10 @@ def bbox_right_of(a, b):
     xc, yc = bbox_center(a)
     return xc > b["l"] and yc >= b["t"] and yc <= b["b"]
 
+def bbox_left_of(a, b):
+    xc, yc = bbox_center(a)
+    return xc < b["r"] and yc >= b["t"] and yc <= b["b"]
+
 def bbox_same_line(a, b):
     xc, yc = bbox_center(a)
     return yc >= b["t"] and yc <= b["b"]
@@ -412,7 +425,7 @@ def bbox_merge(a, b):
         r=max(r0, r1),
     )
 
-def merge_overlapping(bboxes):
+def merge_overlapping(bboxes, threshold=3, rthreshold=0.1):
     bboxes = list(bboxes)
     for i in range(len(bboxes)):
         for j in range(len(bboxes)):
@@ -420,7 +433,11 @@ def merge_overlapping(bboxes):
                 continue
             if bboxes[i] is None or bboxes[j] is None:
                 continue
-            if bbox_right_of(bboxes[j], bboxes[i]) and bboxes[j]["l"] - bboxes[i]["r"] < 5:
+            t = max(bbox_height(bboxes[i]) * rthreshold, threshold)
+            if bbox_right_of(bboxes[j], bboxes[i]) and bboxes[j]["l"] - bboxes[i]["r"] < t:
+                bboxes[i] = bbox_merge(bboxes[i], bboxes[j])
+                bboxes[j] = None
+            elif bbox_left_of(bboxes[j], bboxes[i]) and bboxes[i]["l"] - bboxes[j]["r"] < t:
                 bboxes[i] = bbox_merge(bboxes[i], bboxes[j])
                 bboxes[j] = None
             elif bbox_same_line(bboxes[j], bboxes[i]) and bbox_overlap(bboxes[j], bboxes[i]) > 0:
