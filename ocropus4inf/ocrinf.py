@@ -7,6 +7,7 @@ import requests
 import scipy.ndimage as ndi
 import torch
 import urllib
+from typing import List, Tuple, Union
 
 from collections import defaultdict
 
@@ -447,6 +448,87 @@ def merge_overlapping(bboxes, threshold=3, rthreshold=0.1):
 
 # bboxes = list(compute_bboxes(probs, pad=10))
 
+def reading_order(lines: List[dict], highlight=None, binary=None, debug=0):
+    """Given the list of lines (a list of dicts with tlbr bounding boxes),
+    computes the partial reading order.  The output is a binary 2D array
+    such that order[i,j] is true if line i comes before line j
+    in reading order."""
+    order = np.zeros((len(lines), len(lines)), "B")
+
+    def x_overlaps(u, v):
+        return u["l"] < v["r"] and u["r"] > v["l"]
+
+    def above(u, v):
+        return u["b"] < v["t"]
+
+    def left_of(u, v):
+        return u["r"] < v["l"]
+
+    def separates(w, u, v):
+        if w["b"] < min(u["t"], v["t"]):
+            return 0
+        if w["t"] > max(u["b"], v["b"]):
+            return 0
+        if w["l"] < u["r"] and w["r"] > v["l"]:
+            return 1
+        return 0
+
+    def center(bbox):
+        return (bbox["l"] + bbox["r"]) / 2, (bbox["t"] + bbox["b"]) / 2
+
+    if highlight is not None:
+        plt.clf()
+        plt.title("highlight")
+        plt.imshow(binary)
+        plt.ginput(1, debug)
+    for i, u in enumerate(lines):
+        for j, v in enumerate(lines):
+            if x_overlaps(u, v):
+                if above(u, v):
+                    order[i, j] = 1
+            else:
+                if [w for w in lines if separates(w, u, v)] == []:
+                    if left_of(u, v):
+                        order[i, j] = 1
+            if j == highlight and order[i, j]:
+                print((i, j), end=" ")
+                y0, x0 = center(lines[i])
+                y1, x1 = center(lines[j])
+                plt.plot([x0, x1 + 200], [y0, y1])
+    if highlight is not None:
+        print()
+        plt.ginput(1, debug)
+    return order
+
+
+def find(condition):
+    "Return the indices where ravel(condition) is true"
+    (res,) = np.nonzero(np.ravel(condition))
+    return res
+
+
+def topsort(order):
+    """Given a binary array defining a partial order (o[i,j]==True means i<j),
+    compute a topological sort.  This is a quick and dirty implementation
+    that works for up to a few thousand elements."""
+    n = len(order)
+    visited = np.zeros(n)
+    L = []
+
+    def visit(k):
+        if visited[k]:
+            return
+        visited[k] = 1
+        for l in find(order[:, k]):
+            visit(l)
+        L.append(k)
+
+    for k in range(n):
+        visit(k)
+    return L  # [::-1]
+
+
+
 import matplotlib.patches as patches
 
 
@@ -513,10 +595,7 @@ def assign_bboxes_to_lines(bboxes, linemap):
     for bbox in bboxes:
         xc, yc = bbox_center(bbox)
         bbox["lineno"] = linemap[int(yc), int(xc)]
-    lines = defaultdict(list)
-    for bbox in bboxes:
-        lines[bbox["lineno"]].append(bbox)
-    return lines
+    return max([bbox["lineno"] for bbox in bboxes] + [0]) + 1
 
 def bbox_patch(box, text=None, ax=None, linewidth=1, rcolor="r", alpha=1.0, facecolor="none", fontsize=12, color="r", offset=(0, 0)):
     t, l, b, r = [box[c] for c in "tlbr"]
@@ -601,9 +680,21 @@ class PageRecognizer:
                 bboxes[i]["text"] = pred[i]
         if self.seg_full.shape[2] == 7:
             self.linemap = compute_linemap(self.seg_full)
-            self.lines = assign_bboxes_to_lines(self.bboxes, self.linemap)
+            nlines = assign_bboxes_to_lines(self.bboxes, self.linemap)
+            raw_lines = [[] for i in range(nlines)]
+            for b in self.bboxes:
+                raw_lines[b["lineno"]].append(b)
+            for i in range(nlines):
+                raw_lines[i] = sorted(raw_lines[i], key=lambda b: b["l"])
+            self.lines = [dict(words=raw_lines[i], **bbox_all(raw_lines[i])) for i in range(nlines)]
+            self.partial_reading_order = reading_order(self.lines)          
+            self.line_index = topsort(self.partial_reading_order)
+            new_lines = [[] for i in range(max(self.line_index) + 1)]
+            for i in range(len(self.line_index)):
+                new_lines[i] = self.lines[self.line_index[i]]
+            self.lines = new_lines
         else:
-            self.lines = {0: self.bboxes}
+            self.lines = [dict(words=self.bboxes, **bbox_all(self.bboxes))]
         if not keep_images:
             for b in self.bboxes:
                 del b["image"]
@@ -620,12 +711,8 @@ class PageRecognizer:
             box = self.bboxes[i]
             text = box["text"]
             bbox_patch(box, text=text, ax=ax, fontsize=fontsize, color=color, offset=offset)
-        for i in self.lines.keys():
-            if i == 0:
-                continue
-            bboxes = self.lines[i]
-            box = bbox_all(bboxes)
-            bbox_patch(box, ax=ax, rcolor=lcolor)
+        for l in self.lines:
+            bbox_patch(l, ax=ax, rcolor=lcolor)
 
 
     def draw_words(self, nrows=6, ncols=4, ax=None):
