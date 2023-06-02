@@ -399,22 +399,24 @@ def bbox_height(a):
 def bbox_width(a):
     return a["r"] - a["l"]
 
-def bbox_right_of(a, b):
-    xc, yc = bbox_center(a)
-    return xc > b["l"] and yc >= b["t"] and yc <= b["b"]
-
-def bbox_left_of(a, b):
-    xc, yc = bbox_center(a)
-    return xc < b["r"] and yc >= b["t"] and yc <= b["b"]
-
-def bbox_same_line(a, b):
-    xc, yc = bbox_center(a)
-    return yc >= b["t"] and yc <= b["b"]
-
 def bbox_overlap(a, b):
     t0, l0, b0, r0 = [a[c] for c in "tlbr"]
     t1, l1, b1, r1 = [b[c] for c in "tlbr"]
     return max(0, min(b0, b1) - max(t0, t1)) * max(0, min(r0, r1) - max(l0, l1))
+
+def bbox_area(a):
+    return (a["b"] - a["t"]) * (a["r"] - a["l"])
+
+def bbox_overlap_frac(a, b):
+    area = min(bbox_area(a), bbox_area(b))
+    return bbox_overlap(a, b) * 1.0 / area
+
+def bbox_same_line(a, b):
+    # b is on the same line as a
+    delta = bbox_height(a) * 0.3
+    xc, yc = bbox_center(b)
+    assert a["t"] <= a["b"]
+    return b["t"] > a["t"] - delta and b["b"] < a["b"] + delta
 
 def bbox_merge(a, b):
     t0, l0, b0, r0 = [a[c] for c in "tlbr"]
@@ -430,20 +432,13 @@ def merge_overlapping(bboxes, threshold=3, rthreshold=0.1):
     bboxes = list(bboxes)
     for i in range(len(bboxes)):
         for j in range(len(bboxes)):
-            if i == j:
+            if i == j or bboxes[i] is None or bboxes[j] is None:
                 continue
-            if bboxes[i] is None or bboxes[j] is None:
-                continue
-            t = max(bbox_height(bboxes[i]) * rthreshold, threshold)
-            if bbox_right_of(bboxes[j], bboxes[i]) and bboxes[j]["l"] - bboxes[i]["r"] < t:
-                bboxes[i] = bbox_merge(bboxes[i], bboxes[j])
-                bboxes[j] = None
-            elif bbox_left_of(bboxes[j], bboxes[i]) and bboxes[i]["l"] - bboxes[j]["r"] < t:
-                bboxes[i] = bbox_merge(bboxes[i], bboxes[j])
-                bboxes[j] = None
-            elif bbox_same_line(bboxes[j], bboxes[i]) and bbox_overlap(bboxes[j], bboxes[i]) > 0:
-                bboxes[i] = bbox_merge(bboxes[i], bboxes[j])
-                bboxes[j] = None
+            height = bbox_height(bboxes[i])
+            if bbox_width(bboxes[j]) < height:
+                if bbox_same_line(bboxes[j], bboxes[i]) and bbox_overlap_frac(bboxes[i], bboxes[j]) > 0.5:
+                    bboxes[i] = bbox_merge(bboxes[i], bboxes[j])
+                    bboxes[j] = None
     return [b for b in bboxes if b is not None]
 
 # bboxes = list(compute_bboxes(probs, pad=10))
@@ -686,7 +681,7 @@ class PageRecognizer:
                 raw_lines[b["lineno"]].append(b)
             for i in range(nlines):
                 raw_lines[i] = sorted(raw_lines[i], key=lambda b: b["l"])
-            self.lines = [dict(words=raw_lines[i], **bbox_all(raw_lines[i])) for i in range(nlines)]
+            self.lines = [dict(words=raw_lines[i], **bbox_all(raw_lines[i])) for i in range(nlines) if len(raw_lines[i]) > 0]
             self.partial_reading_order = reading_order(self.lines)          
             self.line_index = topsort(self.partial_reading_order)
             new_lines = [[] for i in range(max(self.line_index) + 1)]
@@ -694,7 +689,7 @@ class PageRecognizer:
                 new_lines[i] = self.lines[self.line_index[i]]
             self.lines = new_lines
         else:
-            self.lines = [dict(words=self.bboxes, **bbox_all(self.bboxes))]
+            self.lines = [dict(words=self.bboxes, **bbox_all(self.bboxes))] if len(self.bboxes) > 0 else []
         if not keep_images:
             for b in self.bboxes:
                 del b["image"]
